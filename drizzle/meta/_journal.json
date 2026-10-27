@@ -1,0 +1,13 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1788750821072,
+      "tag": "0000_special_silver_surfer",
+      "breakpoints": true
+    }
+  ]
+}
