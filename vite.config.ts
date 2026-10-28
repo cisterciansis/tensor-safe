@@ -1,74 +1,37 @@
-import { sites } from '@openai/sites-vite-plugin';
 import tailwindcss from '@tailwindcss/postcss';
-import vinext from 'vinext';
+import react from '@vitejs/plugin-react';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
-import hostingConfig from './.openai/hosting.json' with { type: 'json' };
 
-const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
-  '00000000-0000-4000-8000-000000000000';
-
-const { d1, r2 } = hostingConfig;
-
-const localBindingConfig = {
-  main: 'vinext/server/fetch-handler',
-  compatibility_flags: ['nodejs_compat'],
-  d1_databases: d1
-    ? [
-        {
-          binding: d1,
-          database_name: 'site-creator-d1',
-          database_id: SITE_CREATOR_PLACEHOLDER_DATABASE_ID,
-        },
-      ]
-    : [],
-  r2_buckets: r2
-    ? [
-        {
-          binding: r2,
-          bucket_name: 'site-creator-r2',
-        },
-      ]
-    : [],
-};
-
-export default defineConfig(async () => {
-  // Keep Wrangler and Miniflare state project-local. These are non-secret tool
-  // settings; application environment belongs in ignored `.env*` files.
-  process.env.WRANGLER_WRITE_LOGS ??= 'false';
-  process.env.WRANGLER_LOG_PATH ??= '.wrangler/logs';
-  process.env.MINIFLARE_REGISTRY_PATH ??= '.wrangler/registry';
-
-  // Wrangler snapshots its log path while the Cloudflare plugin is imported.
-  const { cloudflare } = await import('@cloudflare/vite-plugin');
-
-  return {
-    // Identity headers are trusted only behind a configured Sites project.
-    define: {
-      __SITES_GATEWAY__: JSON.stringify(Boolean(hostingConfig.project_id)),
-    },
-    // These platform shims use web globals in both browsers and Workers.
-    resolve: {
-      alias: [
-        {
-          find: /^@polkadot\/wasm-crypto-init$/,
-          replacement: '@polkadot/wasm-crypto-init/none',
-        },
-        ...['textdecoder', 'textencoder', 'randomvalues', 'fetch', 'ws'].map(
-          (name) => ({
-            find: new RegExp(`^@polkadot/x-${name}$`),
-            replacement: `@polkadot/x-${name}/browser`,
-          }),
-        ),
-      ],
-    },
-    css: { postcss: { plugins: [tailwindcss()] } },
-    plugins: [
-      vinext(),
-      sites(),
-      cloudflare({
-        viteEnvironment: { name: 'rsc', childEnvironments: ['ssr'] },
-        config: localBindingConfig,
-      }),
+export default defineConfig(({ isSsrBuild }) => ({
+  resolve: {
+    alias: [
+      {
+        find: /^@\//,
+        replacement: fileURLToPath(new URL('./', import.meta.url)),
+      },
+      // Polkadot platform shims: use the web-global variants in the browser.
+      {
+        find: /^@polkadot\/wasm-crypto-init$/,
+        replacement: '@polkadot/wasm-crypto-init/none',
+      },
+      ...['textdecoder', 'textencoder', 'randomvalues', 'fetch', 'ws'].map(
+        (name) => ({
+          find: new RegExp(`^@polkadot/x-${name}$`),
+          replacement: `@polkadot/x-${name}/browser`,
+        }),
+      ),
     ],
-  };
-});
+  },
+  css: { postcss: { plugins: [tailwindcss()] } },
+  plugins: [react()],
+  server: {
+    port: 3000,
+    proxy: { '/api': 'http://127.0.0.1:8787' },
+  },
+  // `vite build` emits the SPA; `vite build --ssr server/main.ts` emits the
+  // Node server with node_modules left external (Vite's SSR default).
+  build: isSsrBuild
+    ? { target: 'node22', copyPublicDir: false }
+    : { outDir: 'dist/client' },
+}));

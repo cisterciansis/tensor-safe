@@ -6,6 +6,7 @@ import type {
   InjectedAccount,
   InjectedWindow,
 } from '@polkadot/extension-inject/types';
+import { stringToHex } from '@polkadot/util';
 import { decodeAddress, encodeAddress } from '@polkadot/util-crypto';
 import {
   Popover,
@@ -136,6 +137,28 @@ export function useWallets() {
 /** Signer for a connected account, or undefined if its wallet disconnected. */
 export const signerFor = (wallets: Extension[], account?: WalletAccount) =>
   wallets.find((e) => e.id === account?.wallet)?.injected?.signer;
+
+/**
+ * Asks the wallet holding `address` to sign a text message. Wallets wrap it
+ * in <Bytes>…</Bytes>, so it can never be mistaken for a transaction.
+ */
+export async function signMessage(address: string, message: string) {
+  const account = extensions
+    .flatMap((e) => e.accounts)
+    .find((a) => accountKey(a.address) === accountKey(address));
+  const signRaw = signerFor(extensions, account)?.signRaw;
+  if (!account || !signRaw)
+    throw Error(
+      `Connect the wallet that holds ${address.slice(0, 6)}…${address.slice(-6)} to sign.`,
+    );
+  const { signature } = await signRaw({
+    address: account.address,
+    data: stringToHex(message),
+    type: 'bytes',
+  });
+  // Some wallets prefix the scheme byte (MultiSignature); the server wants 64 bytes.
+  return signature.length === 132 ? `0x${signature.slice(4)}` : signature;
+}
 
 export function WalletMenu({ accounts }: { accounts: Account[] }) {
   const wallets = useWallets();

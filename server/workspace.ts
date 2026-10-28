@@ -11,6 +11,8 @@ import {
   workspaceSchema,
   distributionSnapshot,
   idSchema,
+  accountSigned,
+  agreementSigned,
   type Workspace,
 } from '@/lib/domain';
 import {
@@ -21,7 +23,20 @@ import {
   readWorkspace,
   HttpError,
   noCache,
+  ORIGIN,
+  auditBinding,
+  seal,
+  unseal,
 } from '@/lib/server';
+import type { Statement } from '@/server/db';
+import {
+  CHANGE_TTL_MS,
+  canonical,
+  parseChange,
+  payloadHash,
+  verifyWalletSignature,
+  type Attestation,
+} from '@/lib/auth';
 import {
   connect,
   prepareProposal,
@@ -30,6 +45,57 @@ import {
   safeCalls,
   hashedRegistration,
 } from '@/lib/chain';
+type Command = z.infer<typeof commandSchema>;
+/**
+ * A money-critical change must carry the signed-in wallet's signature over
+ * this exact request: origin, route, workspace, action, network and body hash,
+ * with a fresh nonce and short expiry. Returns the nonce insert so replay
+ * fails inside the same transaction.
+ */
+function assertSigned(
+  command: Command & { attestation: Attestation },
+  workspace: string,
+  signer: string,
+  network: 'finney' | 'test' | 'any',
+  authorised?: string[],
+): Statement {
+  const { attestation, ...unsigned } = command;
+  // Only the server attaches signatures to records; never accept nested ones.
+  if (canonical(unsigned).includes('"attestation":'))
+    throw new HttpError(400, 'Unexpected signature field');
+  if (
+    authorised &&
+    !authorised.some((a) => accountKey(a) === accountKey(signer))
+  )
+    throw new HttpError(
+      403,
+      'Only a co-signer of this multisig can sign this change',
+    );
+  const c = parseChange(attestation.message);
+  const now = Date.now();
+  const issued = Date.parse(c?.issuedAt ?? '');
+  const expires = Date.parse(c?.expiresAt ?? '');
+  if (
+    !c ||
+    c.origin !== ORIGIN ||
+    c.path !== `/api/workspaces/${workspace}` ||
+    c.workspace !== workspace ||
+    c.action !== command.action ||
+    c.network !== network ||
+    c.signer !== signer ||
+    attestation.signer !== signer ||
+    c.payload !== payloadHash(unsigned) ||
+    !/^[0-9a-f]{32}$/.test(c.nonce) ||
+    !(issued <= now + 60_000) ||
+    !(expires > now) ||
+    expires - issued > CHANGE_TTL_MS ||
+    !verifyWalletSignature(attestation.message, attestation.signature, signer)
+  )
+    throw new HttpError(403, 'Wallet signature does not match this change');
+  return db()
+    .prepare('INSERT INTO signed_nonces(nonce,expires) VALUES(?,?)')
+    .bind(c.nonce, expires);
+}
 // Rotating (tao_) accounts must be registered on the network before they
 // receive funds or roles. Contacts are only an address book. Fails closed.
 async function assertRegistered(
@@ -69,43 +135,51 @@ async function assertRegistered(
     await api.disconnect();
   }
 }
-export async function GET(
-  _: Request,
-  { params }: { params: Promise<{ id: string }> },
-) {
+export async function getWorkspace(request: Request, id: string) {
   try {
-    const user = await identity();
-    const { id } = await params;
+    const user = await identity(request);
     idSchema.parse(id);
     const workspace = await readWorkspace(id, user.userId);
     const [audit, members] = await Promise.all([
       db()
         .prepare(
-          'SELECT actor,action,version,created_at,details FROM audit WHERE workspace_id=? ORDER BY version DESC LIMIT 200',
+          'SELECT id,actor,action,version,created_at,details FROM audit WHERE workspace_id=? ORDER BY version DESC LIMIT 200',
         )
         .bind(id)
-        .all(),
+        .all<{
+          id: string;
+          actor: string;
+          action: string;
+          version: number;
+          details: string;
+        }>(),
       db()
         .prepare('SELECT user_id,role FROM members WHERE workspace_id=?')
         .bind(id)
         .all(),
     ]);
     return Response.json(
-      { workspace, audit: audit.results, members: members.results },
+      {
+        workspace,
+        audit: audit.results.map(({ id: row, ...e }) => ({
+          ...e,
+          details: unseal(
+            e.details,
+            auditBinding(id, row, e.version, e.actor, e.action),
+          ),
+        })),
+        members: members.results,
+      },
       { headers: noCache },
     );
   } catch (e) {
     return failure(e);
   }
 }
-export async function POST(
-  request: Request,
-  { params }: { params: Promise<{ id: string }> },
-) {
+export async function updateWorkspace(request: Request, id: string) {
   let api;
   try {
-    const user = await identity();
-    const { id } = await params;
+    const user = await identity(request);
     idSchema.parse(id);
     const raw = await body(request);
     const { version, command } = z
@@ -123,9 +197,29 @@ export async function POST(
     await assertRegistered(w, command, raw);
     const mutation = crypto.randomUUID();
     let evidence: string | undefined;
-    const statements: D1PreparedStatement[] = [];
+    const statements: Statement[] = [];
+    const signing = { id, accounts: w.accounts, origin: ORIGIN };
+    // Cap tables hang off a funding account whose own signature must verify.
+    const verifiedFunding = (accountId: string) => {
+      const account = w.accounts.find((a) => a.id === accountId);
+      if (!account || !accountSigned(signing, account))
+        throw new HttpError(403, 'Funding account is not wallet-signed');
+      return {
+        network: account.network,
+        signers: account.signers.map((s) => s.address),
+      };
+    };
     switch (command.action) {
       case 'addAccount':
+        statements.push(
+          assertSigned(
+            command,
+            id,
+            user.userId,
+            command.account.network,
+            command.account.signers.map((s) => s.address),
+          ),
+        );
         if (w.accounts.length >= 50) throw Error('Account limit reached');
         if (
           w.accounts.some(
@@ -141,9 +235,13 @@ export async function POST(
           api = await connect(command.account.network, true);
           safeCalls(api);
         }
-        w.accounts.push(command.account);
+        w.accounts.push({
+          ...command.account,
+          attestation: command.attestation,
+        });
         break;
       case 'addContact':
+        statements.push(assertSigned(command, id, user.userId, 'any'));
         if (w.contacts.length >= 500) throw Error('Contact limit reached');
         if (
           w.contacts.some(
@@ -152,11 +250,22 @@ export async function POST(
           )
         )
           throw Error('Address already exists');
-        w.contacts.push(command.contact);
+        w.contacts.push({
+          ...command.contact,
+          attestation: command.attestation,
+        });
         break;
-      case 'addAgreement':
-        if (!w.accounts.some((a) => a.id === command.agreement.accountId))
-          throw Error('Unknown funding account');
+      case 'addAgreement': {
+        const funding = verifiedFunding(command.agreement.accountId);
+        statements.push(
+          assertSigned(
+            command,
+            id,
+            user.userId,
+            funding.network,
+            funding.signers,
+          ),
+        );
         if (w.agreements.some((a) => a.id === command.agreement.id))
           throw Error('Agreement already exists');
         if (
@@ -165,11 +274,25 @@ export async function POST(
             command.agreement.startBlock + 1
         )
           throw Error('Initial ownership must start at the opening interval');
-        w.agreements.push(command.agreement);
+        w.agreements.push({
+          ...command.agreement,
+          attestation: command.attestation,
+        });
         break;
+      }
       case 'reviseAgreement': {
         const a = w.agreements.find((a) => a.id === command.id);
         if (!a) throw Error('Unknown agreement');
+        const funding = verifiedFunding(a.accountId);
+        statements.push(
+          assertSigned(
+            command,
+            id,
+            user.userId,
+            funding.network,
+            funding.signers,
+          ),
+        );
         const last = Math.max(
           a.startBlock,
           a.accrual?.toBlock ?? 0,
@@ -182,7 +305,10 @@ export async function POST(
           throw Error(
             'Revision must follow every reserved interval and existing revision',
           );
-        a.revisions.push(command.revision);
+        a.revisions.push({
+          ...command.revision,
+          attestation: command.attestation,
+        });
         break;
       }
       case 'accrue': {
@@ -232,6 +358,12 @@ export async function POST(
           throw Error('Distribution ID already exists');
         const a = w.agreements.find((a) => a.id === command.agreementId);
         if (!a) throw Error('Unknown agreement');
+        // Payout recipients come from the cap table: it must verify here too.
+        if (!agreementSigned(signing, a))
+          throw new HttpError(
+            403,
+            'Cap table is not wallet-signed by a co-signer',
+          );
         const accrued =
           command.action === 'distributeAccrued' ? a.accrual : undefined;
         if (command.action === 'distributeAccrued' && !accrued)
@@ -492,7 +624,7 @@ export async function POST(
       .prepare(
         'UPDATE workspaces SET state=?,version=version+1,mutation=? WHERE id=? AND version=?',
       )
-      .bind(serialized, mutation, id, version);
+      .bind(seal(serialized, `${id}:state`), mutation, id, version);
     if (evidence)
       statements.push(
         db()
@@ -513,7 +645,16 @@ export async function POST(
           command.action,
           version + 1,
           new Date().toISOString(),
-          JSON.stringify(command),
+          seal(
+            JSON.stringify(command),
+            auditBinding(
+              id,
+              mutation,
+              version + 1,
+              user.userId,
+              command.action,
+            ),
+          ),
           id,
           mutation,
         ),

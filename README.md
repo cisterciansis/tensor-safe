@@ -1,10 +1,11 @@
 # Tensor Safe
 
-A Safe-inspired, non-custodial Bittensor treasury workspace. Built with React, TypeScript, Substrate metadata-aware transaction tools and a small Cloudflare D1 backend. Independent project; not affiliated with Safe.
+A Safe-inspired, non-custodial Bittensor treasury workspace: a React single-page app and one small Node server. You sign in with your wallet, and changes that decide where money goes are wallet-signed so every browser can detect tampering. Independent project; not affiliated with Safe.
 
 ## What works
 
-- Durable workspaces, owner/manager/viewer access, shared addresses and append-only audit events.
+- Wallet sign-in (Sr25519/Ed25519 message signature), wallet-address members with owner/manager/viewer roles, and append-only audit events.
+- Wallet-signed accounts, contacts and cap tables, re-verified in every browser and required before payouts.
 - Deterministic multisig creation/import, finalized balance/proxy/approval inspection, configuration export.
 - TAO transfers, same-subnet alpha transfers, limit-price staking/unstaking, proxy add/remove, advanced SCALE calls and atomic batches.
 - Existing on-chain multisig preimage import, approval, final execution, depositor cancellation and failed/cancelled proposal rebuild.
@@ -21,7 +22,7 @@ Ordinary owner emission credits have no dedicated runtime event. **Automatic arc
 
 Advanced proxy operations (announcements, delayed execution, pure proxies and beneficiary-specific calls) use reviewed SCALE calls; dedicated guided forms are not provided. External accounts must supply their exact multisig preimage. Mainnet and testnet genesis hashes are pinned.
 
-The hosting platform initially restricts this site to its owner. Adding a workspace member does not grant platform access. Hosting access and application membership must both allow the person. Workspace roles never grant on-chain signing authority.
+Workspace roles never grant on-chain signing authority. Sign-in needs a browser wallet that signs messages; ML-DSA, Falcon and rotating keys can't sign in yet, so their owners sign in with any ordinary account and approve multisig actions with btcli.
 
 ## Run locally
 
@@ -29,31 +30,29 @@ Node >=22.13; npm.
 
 ```sh
 npm ci
-npm run db:local
-npm run dev
+npm run dev        # Vite on http://localhost:3000, API on :8787 (SQLite in data/)
 ```
 
-Open the URL printed by the server and use its local sign-in. The Sites development plugin provides an isolated local identity; spoofed forwarded identity headers are stripped.
+Open http://localhost:3000 and sign in with a browser wallet (Talisman, SubWallet or Polkadot.js).
 
 ```sh
-npm test                 # deterministic domain, reconciliation and SQLite checks
-npm run check            # TypeScript and lint; vendored UI primitives excluded
-npm run test:api         # against the running local development server
-npm run test:chain       # read-only live metadata + local test-key signing, never broadcast
-npm run build
+npm test           # domain, accounting, wallet formats, sign-in and full server flow (offline)
+npm run check      # TypeScript and lint
+npm run test:chain # read-only live metadata + local test-key signing, never broadcast
+npm run build      # dist/client (static app) + dist/server/main.js
+npm start          # serve both from one process
 ```
-
-`TEST_ORIGIN` overrides the API test URL (default http://localhost:3001). API checks create an explicitly named local validation workspace. No production migrations contain seeds. `db:local` is for the initial empty local DB; production migration history is append-only.
 
 ## Small architecture
 
-- `lib/domain.ts`: strict boundary schemas, address identity, integer math and interval rules.
+- `lib/domain.ts`: strict boundary schemas, address identity, integer math, interval rules and signed-record checks.
 - `lib/chain.ts`: metadata-aware call construction, multisig lifecycle and finalized outcome verification.
+- `lib/auth.ts`: the exact sign-in and signed-change messages wallets sign, shared by browser and server.
 - `lib/accrual.ts`: bounded runtime-454 archive reconstruction with continuity and ownership checks.
 - `lib/offline.ts`: metadata proofs and strict signed-payload verification.
-- `app/api/workspaces`: authenticated command endpoints. Each state update uses a version compare-and-swap and an atomic batch containing the audit record and optional unique settlement evidence.
-- `db/schema.ts` and `drizzle/`: durable schema and migrations.
-- `app/page.tsx`, `forms.tsx`, `signing.tsx`, `chain-view.tsx`: the workspace and its interaction flows.
+- `server/`: `node:http` server (`main.ts`), wallet sessions (`session.ts`), workspace commands (`workspace.ts`, `workspaces.ts`) and storage (`db.ts`: SQLite, or Postgres when `DATABASE_URL` is set). Each state update uses a version compare-and-swap and one transaction holding the audit record, settlement evidence and signed-change nonce.
+- `db/migrations`, `db/migrations-pg`: numbered SQL applied at startup.
+- `app/`: the single-page app (`page.tsx`, `forms.tsx`, `signing.tsx`, `wallets.tsx`, `sign-in.tsx`, …).
 
 The workspace document is intentionally bounded to 2 MB, 50 accounts and 5,000 proposals. A single optimistic version serializes workspace mutations; normalize hot tables if sustained contention or larger histories require it. Integer units are decimal strings in JSON and BigInt in calculations. Largest-remainder allocation breaks ties by decoded AccountId, conserving every unit.
 
@@ -80,17 +79,30 @@ Support for the ML-DSA-65, Falcon-512/1024 and rotating ("hashed") wallet types 
 
 `lib/wallets.ts` holds the formats; `tests/wallets.test.ts` checks them against the runtime and SDK golden vectors.
 
-## Deployment and trust boundary
+## Sign-in, signed changes and hosting
 
-Sign-in comes from `oai-authenticated-user-*` headers that the hosting gateway sets after stripping any client copies. The app trusts them only when `.openai/hosting.json` names a Sites `project_id` (a build-time switch) or in `npm run dev`, where the Sites plugin plays the gateway. The published repository ships `"project_id": null`, so a production build fails closed: every workspace request returns 401 and forged headers are ignored.
+**Sign-in.** The server issues a one-time message bound to its public origin, your address, a nonce and a 10-minute expiry. Your wallet signs it (wrapped in `<Bytes>`, so it can never be a transaction) and the server opens a 12-hour HttpOnly, SameSite=Strict session. Challenges are single use and rate-limited.
 
-To self-host elsewhere, put the Worker behind an authentication gateway that strips and sets those headers, then opt in deliberately, or replace `identity()` in `lib/server.ts` with your own verification. Never expose a build that trusts client-supplied identity headers directly. Keep secrets outside the source repository.
+**Signed changes.** Adding an account, contact or cap table, and revising a cap table, require a wallet signature over the exact request: origin, route, workspace, action, network, body hash, signer, nonce and expiry. The server rejects a mismatch or replay and stores the signature with the record. Every browser re-checks it: a record changed after signing shows *Not wallet-signed*, and payouts refuse a cap table that doesn't verify.
 
-The supported Polkadot web shims are selected for Workers. Cryptographic operations use the library's JavaScript implementations; runtime WASM compilation is disabled for this environment. Production dependency audit was clean at build time. Remaining moderate advisories belong to development-only Drizzle tooling.
+**Hosting.** Configuration is environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `PUBLIC_ORIGIN` | Exact origin users load (`https://…`). Required in production; sign-in and same-origin checks bind to it. |
+| `PORT`, `STATIC_DIR` | Listen port and the built `dist/client` to serve. |
+| `DATABASE_URL` | Postgres (TLS mode in the URL). Without it, SQLite at `DATABASE_PATH` (default `data/tensor-safe.db`). |
+| `DATA_KEY` | Optional base64 32-byte key. Workspace state and audit details are then AES-256-GCM sealed at rest. |
+| `TRUST_PROXY` | Set behind a TLS proxy so rate limits use `X-Forwarded-For`. |
+| `DB_DIR` | Directory holding `migrations/` and `migrations-pg/` (default `./db`). |
+
+Responses carry a strict Content-Security-Policy (scripts only from this origin; network only to this origin and the Bittensor RPC endpoints), frame denial and no-referrer. For the attested deployment on AWS Nitro Enclaves via Caution, see `docs/deploy-caution.md`.
+
+Cryptographic operations use the Polkadot libraries' JavaScript implementations; no WebAssembly is compiled at runtime.
 
 Research and pinned source references: `docs/chain-research.md`, `docs/accounting-research.md`, `docs/signing-research.md`.
 
-The optional `inspect_treasury_workspace` WebMCP tool exposes the current read-only state. Its runtime registration could not be exercised because this environment did not provide a supported WebMCP validation context. Browser checks used the local development server with mock wallet extensions; hardware wallets and Polkadot Vault have not been exercised on real devices.
+The optional `inspect_treasury_workspace` WebMCP tool exposes the current read-only state. Its runtime registration could not be exercised because this environment did not provide a supported WebMCP validation context. Browser checks used the local development and production servers with mock wallet extensions; hardware wallets and Polkadot Vault have not been exercised on real devices.
 
 ## Guided owner and validator administration
 

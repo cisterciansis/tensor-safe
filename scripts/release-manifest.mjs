@@ -21,7 +21,7 @@ const walk = (path) =>
   });
 const source = git('ls-files', '-z').split('\0').filter(Boolean).sort();
 const assets = walk('dist/client').sort();
-const worker = walk('dist/server').sort();
+const server = walk('dist/server').sort();
 const manifest = {
   schemaVersion: 1,
   commit: git('rev-parse', '--verify', 'HEAD'),
@@ -30,8 +30,8 @@ const manifest = {
   frontend: Object.fromEntries(
     assets.map((file) => [relative('dist/client', file), digest(file)]),
   ),
-  worker: Object.fromEntries(
-    worker.map((file) => [relative('dist/server', file), digest(file)]),
+  server: Object.fromEntries(
+    server.map((file) => [relative('dist/server', file), digest(file)]),
   ),
   assurance:
     'File hashes only. No independent audit or enclave attestation is asserted.',

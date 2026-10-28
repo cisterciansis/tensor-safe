@@ -3,7 +3,7 @@ import { Choice } from '@/lib/choices';
 import { useState, useRef, useEffect } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
 import { ZodError } from 'zod';
-import { Copyable } from '@/components/copyable';
+import { Copyable, short } from '@/components/copyable';
 import {
   Dialog,
   DialogContent,
@@ -14,6 +14,10 @@ import {
 import {
   responseSchema,
   accountSchema,
+  agreementSchema,
+  agreementSigned,
+  revisionSchema,
+  signerSchema,
   accountAddress,
   parseUnits,
   allocate,
@@ -23,6 +27,8 @@ import {
   type Owner,
 } from '@/lib/domain';
 import { connect, type Chain } from '@/lib/chain';
+import { changeMessage, payloadHash } from '@/lib/auth';
+import { signMessage } from './wallets';
 import {
   SCHEMES,
   isReceiving,
@@ -51,12 +57,15 @@ export default function Forms({
   selected,
   onClose,
   onSave,
+  signer,
 }: {
   kind: FormKind;
   workspace: Workspace | null;
   selected?: string;
   onClose: () => void;
   onSave: (command: unknown) => Promise<unknown>;
+  /** The signed-in wallet, which signs changes that decide where money goes. */
+  signer?: string;
 }) {
   const [name, setName] = useState(''),
     [network, setNetwork] = useState<'finney' | 'test'>('test'),
@@ -209,6 +218,44 @@ export default function Forms({
     }
   }
   const newId = () => crypto.randomUUID();
+  // Signs exactly what the server will store; see lib/auth.ts.
+  async function attest<T extends { action: string }>(
+    command: T,
+    network: 'finney' | 'test' | 'any',
+    summary: string,
+  ) {
+    if (!workspace || !signer) throw Error('Sign in with your wallet first');
+    const now = Date.now();
+    const nonce = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) =>
+      b.toString(16).padStart(2, '0'),
+    ).join('');
+    const message = changeMessage({
+      origin: location.origin,
+      action: command.action,
+      path: `/api/workspaces/${workspace.id}`,
+      workspace: workspace.id,
+      network,
+      summary,
+      payload: payloadHash(command),
+      signer,
+      nonce,
+      issuedAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + 5 * 60_000).toISOString(),
+    });
+    return {
+      ...command,
+      attestation: {
+        message,
+        signature: await signMessage(signer, message),
+        signer,
+      },
+    };
+  }
+  // Wallet prompts show addresses, not just names, so a lookalike name is visible.
+  const shares = (list: Owner[]) =>
+    list.map((o) => `${o.name} ${short(o.address)} ${o.bps / 100}%`).join(', ');
+  const networkOf = (id?: string) =>
+    workspace?.accounts.find((a) => a.id === id)?.network ?? 'finney';
   const safeSupport = support[network];
   // Rotating wallets are identified by their tao_ descriptor, never by choice.
   const keyType = (s: SignerInput): Scheme => {
@@ -227,48 +274,87 @@ export default function Forms({
           command = { name };
           break;
         case 'account':
-          command = {
-            action: 'addAccount',
-            account: accountSchema.parse({
-              id: newId(),
-              name,
-              network,
-              mode: accountMode,
-              threshold,
-              signers,
-            }),
-          };
+          command = await attest(
+            {
+              action: 'addAccount',
+              account: accountSchema.parse({
+                id: newId(),
+                name,
+                network,
+                mode: accountMode,
+                threshold,
+                signers,
+              }),
+            },
+            network,
+            `Add multisig "${name}": ${threshold} of ${signers.length} on ${network === 'test' ? 'testnet' : 'mainnet'}: ${signers.map((v) => short(v.address)).join(', ')}`,
+          );
           break;
-        case 'contact':
-          command = { action: 'addContact', contact: { name, address } };
+        case 'contact': {
+          const contact = signerSchema.parse({ name, address });
+          command = await attest(
+            { action: 'addContact', contact },
+            'any',
+            `Add contact "${contact.name}" ${contact.address}`,
+          );
           break;
+        }
         case 'member':
           command = { action: 'addMember', userId: address, role };
           break;
-        case 'agreement':
-          command = {
-            action: 'addAgreement',
-            agreement: {
-              id: newId(),
-              name,
-              accountId,
-              netuid: Number(netuid),
-              hotkey,
-              startBlock: Number(block),
-              revisions: [
-                { id: newId(), effectiveBlock: Number(block) + 1, owners },
-              ],
-            },
-          };
+        case 'agreement': {
+          const agreement = agreementSchema.omit({ accrual: true }).parse({
+            id: newId(),
+            name,
+            accountId,
+            netuid: Number(netuid),
+            hotkey,
+            startBlock: Number(block),
+            revisions: [
+              { id: newId(), effectiveBlock: Number(block) + 1, owners },
+            ],
+          });
+          command = await attest(
+            { action: 'addAgreement', agreement },
+            networkOf(accountId),
+            `Create cap table "${name}" for SN${netuid}: ${shares(agreement.revisions[0].owners)}`,
+          );
           break;
-        case 'revision':
-          command = {
-            action: 'reviseAgreement',
-            id: agreementId,
-            revision: { id: newId(), effectiveBlock: Number(block), owners },
-          };
+        }
+        case 'revision': {
+          const agreement = workspace?.agreements.find(
+            (a) => a.id === agreementId,
+          );
+          const revision = revisionSchema.parse({
+            id: newId(),
+            effectiveBlock: Number(block),
+            owners,
+          });
+          command = await attest(
+            { action: 'reviseAgreement', id: agreementId, revision },
+            networkOf(agreement?.accountId),
+            `Revise cap table "${agreement?.name}" from block ${block}: ${shares(revision.owners)}`,
+          );
           break;
-        case 'distribution':
+        }
+        case 'distribution': {
+          // Payout recipients come from the cap table; refuse one that was altered.
+          const cap = workspace?.agreements.find((a) => a.id === agreementId);
+          if (
+            !workspace ||
+            !cap ||
+            !agreementSigned(
+              {
+                id: workspace.id,
+                accounts: workspace.accounts,
+                origin: location.origin,
+              },
+              cap,
+            )
+          )
+            throw Error(
+              'This cap table has no valid wallet signature. Re-create it and sign before paying out.',
+            );
           if (automatic) {
             const a = workspace?.agreements.find((a) => a.id === agreementId);
             if (!a?.accrual || a.accrual.toBlock !== Number(block))
@@ -285,6 +371,7 @@ export default function Forms({
             source,
           };
           break;
+        }
         case 'transaction':
           if (existing) {
             command = {
@@ -580,16 +667,12 @@ export default function Forms({
           )}
           {['contact', 'member'].includes(kind) && (
             <label>
-              {kind === 'member' ? 'Member user ID' : 'Wallet address'}
+              {kind === 'member' ? 'Member wallet address' : 'Wallet address'}
               <input
                 required
                 value={address}
                 onChange={(e) => setAddress(e.target.value)}
-                placeholder={
-                  kind === 'member'
-                    ? 'Copy from their workspace settings'
-                    : '5… or tao_…'
-                }
+                placeholder={kind === 'member' ? '5…' : '5… or tao_…'}
               />
             </label>
           )}

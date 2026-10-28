@@ -10,16 +10,14 @@ Archive that manifest beside the deployment bundle and independently reproduce i
 
 The current build uses framework tooling and Google font integration. Reproducible enclave images require pinning the complete toolchain, build inputs and font assets, then comparing independent builds. A matching source commit alone does not prove byte-for-byte reproducibility or which code the browser received.
 
-## Caution integration boundary
+## Attested hosting
 
-Caution documents source-linked build and enclave verification: https://caution.co/ and https://docs.caution.co/. Preparation here creates release inputs and a manifest; this deployment remains on Sites. No Caution enclave, attestation, audit seal or verified-runtime badge is claimed.
+The hosted deployment runs the reproducible container image inside an AWS Nitro Enclave through Caution, and anyone can check that the running enclave was built from a given public commit. Steps and limits are in `docs/deploy-caution.md`. Storage lives outside the enclave (Postgres), sealed with a key only the enclave holds, and money-critical records also carry wallet signatures every browser verifies.
 
-The current application depends on Cloudflare D1 and Sites authenticated headers. A future Caution deployment must provide a supported persistent database and a real authentication gateway which strips and verifies identity headers. Port and verify those boundaries before serving this Worker through another host. Do not expose the present Worker directly while trusting arbitrary caller-supplied identity headers.
-
-For enclave deployment, bind the reviewed commit, lockfile, frontend assets, server image, configuration, toolchain and expected enclave measurements. Verify the attestation chain, measurements, freshness and TLS termination path. Ensure the browser-delivered assets are part of the measured release or independently hash-verified. Enclave isolation does not audit business logic, prevent a malicious approved release, fix wallet firmware, or make public blockchain activity private.
+Bind the reviewed commit, lockfile, frontend assets, server image, configuration, toolchain and expected enclave measurements. The browser-delivered assets are inside the measured image. Enclave isolation does not audit business logic, prevent a malicious approved release, fix wallet firmware, or make public blockchain activity private.
 
 ## Open-source release preparation
 
-The browser source, transaction encoders, schemas and tests are separated from platform adapters. Keep release artifacts free of credentials and local workspace data. Preserve dependency notices and choose the project's public license before publishing a public repository. The current private source push is not a public open-source release.
+The browser source, transaction encoders, schemas and tests are separated from platform adapters. Keep release artifacts free of credentials and local workspace data. Preserve dependency notices. The public repository is Apache-2.0 licensed.
 
 Publish a threat model, dependency inventory and supported device/version matrix beside the source. Receive vulnerability reports privately before public disclosure. No real funds, wallet seeds, or private customer data belong in an issue or reproduction.

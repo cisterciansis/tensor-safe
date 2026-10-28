@@ -1,9 +1,17 @@
 import { z } from 'zod';
 import { nameSchema, emptyState } from '@/lib/domain';
-import { db, identity, body, failure, noCache } from '@/lib/server';
-export async function GET() {
+import {
+  auditBinding,
+  body,
+  db,
+  failure,
+  identity,
+  noCache,
+  seal,
+} from '@/lib/server';
+export async function listWorkspaces(request: Request) {
   try {
-    const user = await identity();
+    const user = await identity(request);
     const rows = await db()
       .prepare(
         'SELECT DISTINCT w.id,w.name,w.version FROM workspaces w LEFT JOIN members m ON m.workspace_id=w.id WHERE w.owner=? OR m.user_id=? ORDER BY w.name',
@@ -21,9 +29,9 @@ export async function GET() {
     return failure(e);
   }
 }
-export async function POST(request: Request) {
+export async function createWorkspace(request: Request) {
   try {
-    const user = await identity();
+    const user = await identity(request);
     const { name } = z
       .object({ name: nameSchema })
       .strict()
@@ -39,7 +47,13 @@ export async function POST(request: Request) {
         .prepare(
           'INSERT INTO workspaces(id,owner,name,state,mutation) VALUES(?,?,?,?,?)',
         )
-        .bind(id, user.userId, name, JSON.stringify(emptyState()), id),
+        .bind(
+          id,
+          user.userId,
+          name,
+          seal(JSON.stringify(emptyState()), `${id}:state`),
+          id,
+        ),
       db()
         .prepare(
           'INSERT INTO audit(id,workspace_id,actor,action,version,created_at,details) VALUES(?,?,?,?,?,?,?)',
@@ -51,7 +65,10 @@ export async function POST(request: Request) {
           'createWorkspace',
           0,
           new Date().toISOString(),
-          JSON.stringify({ name }),
+          seal(
+            JSON.stringify({ name }),
+            auditBinding(id, id, 0, user.userId, 'createWorkspace'),
+          ),
         ),
     ]);
     return Response.json({ id }, { status: 201, headers: noCache });

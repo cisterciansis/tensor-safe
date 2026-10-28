@@ -14,6 +14,7 @@ import {
   safeMultisigId,
   type Scheme,
 } from './wallets';
+import { attestationSchema, checkAttestation } from './auth';
 export const NETWORKS = {
   finney: {
     name: 'Bittensor',
@@ -30,7 +31,13 @@ export const NETWORKS = {
     http: 'https://test.finney.opentensor.ai:443',
   },
 } as const;
-export const nameSchema = z.string().trim().min(1).max(80);
+// Names appear in wallet prompts: no control, bidi or other format characters.
+export const nameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(80)
+  .regex(/^[^\p{Cc}\p{Cf}]+$/u, 'Use visible characters only');
 export const addressSchema = z
   .string()
   .min(3)
@@ -112,6 +119,7 @@ export const signerSchema = z.preprocess(
       scheme: z.enum(Object.keys(SCHEMES) as [Scheme, ...Scheme[]]).optional(),
       rotating: z.boolean().optional(),
       receiving: receivingSchema.optional(),
+      attestation: attestationSchema.optional(),
     })
     .strict()
     .superRefine((s, c) => {
@@ -149,6 +157,7 @@ export const accountSchema = z
     network: z.enum(['finney', 'test']),
     // Address derivation is identity: absent means legacy, never reinterpreted.
     mode: z.enum(['legacy', 'safe']).optional(),
+    attestation: attestationSchema.optional(),
     threshold: z.number().int().min(2).max(32),
     signers: z.array(signerSchema).min(2).max(32),
   })
@@ -305,7 +314,12 @@ export const operationSchema = z.discriminatedUnion('kind', [
 ]);
 export type Operation = z.infer<typeof operationSchema>;
 export const revisionSchema = z
-  .object({ id: idSchema, effectiveBlock: blockSchema, owners: ownersSchema })
+  .object({
+    id: idSchema,
+    effectiveBlock: blockSchema,
+    owners: ownersSchema,
+    attestation: attestationSchema.optional(),
+  })
   .strict();
 export const accrualSchema = z
   .object({
@@ -327,6 +341,7 @@ export const agreementSchema = z
     startBlock: blockSchema,
     revisions: z.array(revisionSchema).min(1).max(100),
     accrual: accrualSchema.optional(),
+    attestation: attestationSchema.optional(),
   })
   .strict();
 export type Agreement = z.infer<typeof agreementSchema>;
@@ -402,14 +417,26 @@ export const commandSchema = z.discriminatedUnion('action', [
       callHex: z.string().regex(/^0x([0-9a-fA-F]{2}){2,16384}$/),
     })
     .strict(),
+  // Changes that decide where money goes are wallet-signed (lib/auth.ts).
   z
-    .object({ action: z.literal('addAccount'), account: accountSchema })
+    .object({
+      action: z.literal('addAccount'),
+      account: accountSchema,
+      attestation: attestationSchema,
+    })
     .strict(),
-  z.object({ action: z.literal('addContact'), contact: signerSchema }).strict(),
+  z
+    .object({
+      action: z.literal('addContact'),
+      contact: signerSchema,
+      attestation: attestationSchema,
+    })
+    .strict(),
   z
     .object({
       action: z.literal('addAgreement'),
       agreement: agreementSchema.omit({ accrual: true }),
+      attestation: attestationSchema,
     })
     .strict(),
   z
@@ -417,6 +444,7 @@ export const commandSchema = z.discriminatedUnion('action', [
       action: z.literal('reviseAgreement'),
       id: idSchema,
       revision: revisionSchema,
+      attestation: attestationSchema,
     })
     .strict(),
   z
@@ -458,21 +486,95 @@ export const commandSchema = z.discriminatedUnion('action', [
   z
     .object({
       action: z.literal('addMember'),
-      userId: z
-        .string()
-        .min(1)
-        .max(200)
-        .regex(/^[a-zA-Z0-9_@.:-]+$/),
+      userId: addressSchema,
       role: z.enum(['manager', 'viewer']),
     })
     .strict(),
   z
     .object({
       action: z.literal('removeMember'),
-      userId: z.string().min(1).max(200),
+      userId: addressSchema,
     })
     .strict(),
 ]);
+const unsigned = <T extends { attestation?: unknown }>(r: T) => ({
+  ...r,
+  attestation: undefined,
+});
+/**
+ * The exact command each wallet-signed record came from, so any browser can
+ * check its signature against what is stored now.
+ */
+export const signedCommands = {
+  account: (a: Account) => ({ action: 'addAccount', account: unsigned(a) }),
+  contact: (c: z.infer<typeof signerSchema>) => ({
+    action: 'addContact',
+    contact: unsigned(c),
+  }),
+  agreement: ({ accrual: _, ...a }: Agreement) => ({
+    action: 'addAgreement',
+    agreement: { ...unsigned(a), revisions: [unsigned(a.revisions[0])] },
+  }),
+  revision: (a: Agreement, r: Agreement['revisions'][number]) => ({
+    action: 'reviseAgreement',
+    id: a.id,
+    revision: unsigned(r),
+  }),
+};
+/** Where signatures are checked: the workspace, its accounts, and the app origin. */
+export type SigningContext = {
+  id: string;
+  accounts: Account[];
+  origin?: string;
+};
+const signerAddresses = (a: Account) => a.signers.map((s) => s.address);
+const verify = (
+  ctx: SigningContext,
+  record: { attestation?: z.infer<typeof attestationSchema> },
+  command: { action: string },
+  network: 'finney' | 'test' | 'any',
+  signers?: string[],
+) =>
+  checkAttestation(record.attestation, {
+    action: command.action,
+    workspace: ctx.id,
+    command,
+    network,
+    origin: ctx.origin,
+    signers,
+  });
+/** An account record must be signed by one of its own co-signers. */
+export const accountSigned = (ctx: SigningContext, a: Account) =>
+  verify(ctx, a, signedCommands.account(a), a.network, signerAddresses(a));
+/** Contacts are suggestions, not authority: any workspace wallet may sign them. */
+export const contactSigned = (
+  ctx: SigningContext,
+  c: z.infer<typeof signerSchema>,
+) => verify(ctx, c, signedCommands.contact(c), 'any');
+/**
+ * A cap table is trustworthy only if its funding account verifies, its creation
+ * and every revision are signed by a co-signer of that account, and revisions
+ * apply in strictly increasing order.
+ */
+export function agreementSigned(ctx: SigningContext, a: Agreement) {
+  const funding = ctx.accounts.find((v) => v.id === a.accountId);
+  if (!funding || !accountSigned(ctx, funding)) return false;
+  const signers = signerAddresses(funding);
+  const ordered = a.revisions.every((r, i) =>
+    i === 0
+      ? r.effectiveBlock === a.startBlock + 1
+      : r.effectiveBlock > a.revisions[i - 1].effectiveBlock,
+  );
+  return (
+    ordered &&
+    verify(ctx, a, signedCommands.agreement(a), funding.network, signers) &&
+    a.revisions
+      .slice(1)
+      .every((r) =>
+        verify(ctx, r, signedCommands.revision(a, r), funding.network, signers),
+      )
+  );
+}
 /** Per-holder totals for one agreement: finalized (paid) and reserved (awaiting execution). */
 export function holderStatement(
   agreementId: string,

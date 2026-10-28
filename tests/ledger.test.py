@@ -1,7 +1,7 @@
 """Runnable SQLite constraint/CAS check; isolated in-memory database."""
 import sqlite3
 from pathlib import Path
-sql = Path(__file__).parents[1].joinpath('drizzle/0000_special_silver_surfer.sql').read_text()
+sql = Path(__file__).parents[1].joinpath('db/migrations/0001_initial.sql').read_text()
 db = sqlite3.connect(':memory:')
 db.executescript(sql)
 db.execute("INSERT INTO workspaces VALUES ('w','u','Test',0,'{}','initial')")

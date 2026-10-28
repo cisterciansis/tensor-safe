@@ -1,0 +1,31 @@
+# Allowlist: only build inputs enter the context. Anything else (data/, dist/,
+# node_modules/, .git/, .env, docs, tests, local tool state) stays out, so it can
+# neither leak into the image nor change it (Tailwind scans every context file).
+*
+!package.json
+!package-lock.json
+!index.html
+!vite.config.ts
+!tsconfig.json
+!.gitignore
+!app/
+!components/
+!hooks/
+!lib/
+!server/
+!public/
+!db/
+
+# Locksmith bundle, Keymaker policy and ciphertext (never .env or keyrings).
+!.caution/quorum-bundle.json
+!.caution/keymaker-pcr-policy.json
+!.caution/secrets/*.asc
+
+# Never, even inside allowed directories.
+**/.env*
+**/*.pem
+**/*.key
+**/*.db
+**/*.db-*
+**/node_modules
+**/.DS_Store

@@ -3,7 +3,6 @@ import { ValidatorChildren } from './validator-children';
 import { AccountControls } from './account-controls';
 import { Tau } from '@/components/tau';
 import { Choice } from '@/lib/choices';
-import Link from 'next/link';
 import {
   useState,
   useEffect,
@@ -22,7 +21,6 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleHelp,
-  Copy,
   Download,
   ExternalLink,
   FileText,
@@ -72,7 +70,11 @@ import { AccountChain, NativeCrowdloan } from './chain-view';
 import {
   accountAddress,
   accountKey,
+  agreementSigned,
   holderStatement,
+  accountSigned,
+  contactSigned,
+  type Agreement,
   formatUnits,
   responseSchema,
   type Account,
@@ -82,6 +84,7 @@ import {
 import { SCHEMES } from '@/lib/wallets';
 import { Copyable, short } from '@/components/copyable';
 import { WalletMenu } from './wallets';
+import { SignIn } from './sign-in';
 const navigation = [
   ['Home', House],
   ['Accounts', Wallet],
@@ -130,8 +133,11 @@ async function request(path: string, body?: unknown) {
   });
   const result = responseSchema.parse(await response.json());
   if (!response.ok)
-    throw Error(
-      result.error + (result.details ? ': ' + result.details.join('; ') : ''),
+    throw Object.assign(
+      Error(
+        result.error + (result.details ? ': ' + result.details.join('; ') : ''),
+      ),
+      { status: response.status },
     );
   return result;
 }
@@ -141,6 +147,7 @@ export default function Home() {
     [workspaces, setWorkspaces] = useState<{ id: string; name: string }[]>([]),
     [workspace, setWorkspace] = useState<Workspace | null>(null),
     [user, setUser] = useState<{ id: string; name: string } | null>(null),
+    [signedOut, setSignedOut] = useState(false),
     [error, setError] = useState(''),
     [loading, setLoading] = useState(true),
     [form, setForm] = useState<{ kind: FormKind; selected?: string } | null>(
@@ -173,6 +180,7 @@ export default function Home() {
         setMembers(result.members ?? []);
         setError('');
       } catch (e) {
+        if ((e as { status?: number }).status === 401) setSignedOut(true);
         setError((e as Error).message);
       } finally {
         setLoading(false);
@@ -190,7 +198,9 @@ export default function Home() {
         if (r.workspaces?.[0]) await load(r.workspaces[0].id);
       })
       .catch((e) => {
-        if (alive) setError(e.message);
+        if (!alive) return;
+        if (e.status === 401) setSignedOut(true);
+        setError(e.message);
       })
       .finally(() => {
         if (alive) setLoading(false);
@@ -246,6 +256,16 @@ export default function Home() {
       .toString(),
     observed = Object.keys(balances).length;
   const editable = workspace?.role !== 'viewer';
+  // Re-check stored records against their wallet signatures in this browser.
+  const verifier = workspace && {
+    id: workspace.id,
+    accounts,
+    origin: location.origin,
+  };
+  const signedAccount = (a: Account) =>
+    !!verifier && accountSigned(verifier, a);
+  const signedAgreement = (a: Agreement) =>
+    !!verifier && agreementSigned(verifier, a);
   const segment = tab || segments[view];
   const title = account
     ? account.name
@@ -266,14 +286,6 @@ export default function Home() {
     setActive(id);
     setView('Accounts');
     window.scrollTo(0, 0);
-  }
-  async function copy(value: string) {
-    try {
-      await navigator.clipboard.writeText(value);
-      setNotice('Copied to clipboard');
-    } catch {
-      setNotice('Clipboard unavailable. Select and copy the full address.');
-    }
   }
   useEffect(() => {
     const ctx = (
@@ -450,11 +462,12 @@ export default function Home() {
       />
     );
   }
+  if (signedOut) return <SignIn onSignedIn={() => location.reload()} />;
   return (
     <SidebarProvider>
       <Sidebar className="treasury-sidebar">
         <SidebarHeader>
-          <Link className="brand" href="/">
+          <a className="brand" href="/">
             <span className="brand-mark">
               <Tau />
             </span>
@@ -462,7 +475,7 @@ export default function Home() {
               Tensor<span className="brand-light"> Safe</span>
             </span>
             <span className="beta">Lab</span>
-          </Link>
+          </a>
           <div className="workspace-picker">
             <span className="workspace-icon">
               {workspace?.name[0]?.toUpperCase() ?? 'T'}
@@ -608,18 +621,7 @@ export default function Home() {
           </div>
           {error && (
             <div className="error-box" role="alert">
-              {error}{' '}
-              {error.includes('Sign in') && (
-                <button
-                  className="text-button"
-                  onClick={() => {
-                    window.top!.location.href =
-                      '/signin-with-chatgpt?return_to=%2F';
-                  }}
-                >
-                  Sign in
-                </button>
-              )}
+              {error}
             </div>
           )}
           {loading && !workspace && (
@@ -709,7 +711,19 @@ export default function Home() {
                           label="account address"
                         />
                       </div>
+                      <Provenance
+                        ok={signedAccount(account)}
+                        signer={account.attestation?.signer}
+                        you={user?.id}
+                      />
                     </div>
+                    {!signedAccount(account) && (
+                      <div className="notice warning">
+                        This account has no valid wallet signature, so its
+                        signers may have been changed. Don’t fund it until a
+                        co-signer re-adds it and signs.
+                      </div>
+                    )}
                     <div className="action-bar">
                       <button
                         className="button primary"
@@ -905,6 +919,11 @@ export default function Home() {
                             <h3>
                               <span className="subnet-badge">SN{a.netuid}</span>
                               {a.name}
+                              <Provenance
+                                ok={signedAgreement(a)}
+                                signer={a.attestation?.signer}
+                                you={user?.id}
+                              />
                             </h3>
                             <button
                               className="button outline"
@@ -1149,6 +1168,11 @@ export default function Home() {
                           {schemeLabel(c) && (
                             <span className="chip">{schemeLabel(c)}</span>
                           )}
+                          <Provenance
+                            ok={!!workspace && contactSigned(verifier!, c)}
+                            signer={c.attestation?.signer}
+                            you={user?.id}
+                          />
                         </strong>
                         {c.receiving && (
                           <Copyable
@@ -1204,19 +1228,23 @@ export default function Home() {
                   >
                     <div className="list">
                       <div className="detail-row">
-                        <span>Your user ID</span>
-                        <code>{user?.id ?? 'Sign in required'}</code>
+                        <span>Signed in as</span>
+                        {user && (
+                          <Copyable value={user.id} label="your address" />
+                        )}
                         <button
-                          className="icon-button"
-                          aria-label="Copy user ID"
-                          onClick={() => user && copy(user.id)}
+                          className="text-button"
+                          onClick={async () => {
+                            await fetch('/api/session', { method: 'DELETE' });
+                            location.reload();
+                          }}
                         >
-                          <Copy size={15} />
+                          Sign out
                         </button>
                       </div>
                       {members.map((m) => (
                         <div className="detail-row" key={m.user_id}>
-                          <code>{m.user_id}</code>
+                          <Copyable value={m.user_id} label="member address" />
                           <span>{m.role}</span>
                           {workspace?.role === 'owner' && (
                             <button
@@ -1243,7 +1271,7 @@ export default function Home() {
                           className="list-button"
                           onClick={() => open('member')}
                         >
-                          <Plus size={17} /> Add member by user ID
+                          <Plus size={17} /> Add member by wallet address
                         </button>
                       )}
                     </div>
@@ -1414,6 +1442,7 @@ export default function Home() {
           workspace={workspace}
           onClose={() => setForm(null)}
           onSave={save}
+          signer={user?.id}
         />
       )}
       {signing && accounts.find((a) => a.id === signing.accountId) && (
@@ -1442,6 +1471,11 @@ export default function Home() {
                 <span className="chip">
                   {a.network === 'test' ? 'Testnet' : 'Mainnet'}
                 </span>
+                <Provenance
+                  ok={signedAccount(a)}
+                  signer={a.attestation?.signer}
+                  you={user?.id}
+                />
               </h3>
               <div className="address-banner">
                 <Copyable
@@ -1482,6 +1516,32 @@ function NavItem({
         {children}
       </SidebarMenuButton>
     </SidebarMenuItem>
+  );
+}
+/** Whether a record still matches the wallet signature it was created with. */
+function Provenance({
+  ok,
+  signer,
+  you,
+}: {
+  ok: boolean;
+  signer?: string;
+  you?: string;
+}) {
+  return ok ? (
+    <span
+      className="status success provenance"
+      title={`Wallet-signed by ${signer}. Every browser re-checks this signature.`}
+    >
+      Signed by {signer === you ? 'you' : short(signer!)}
+    </span>
+  ) : (
+    <span
+      className="status danger provenance"
+      title="No valid wallet signature: this record may have been changed."
+    >
+      Not wallet-signed
+    </span>
   );
 }
 function QuantumBadge() {
