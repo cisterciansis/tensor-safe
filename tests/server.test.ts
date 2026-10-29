@@ -86,7 +86,7 @@ try {
 
   const login = await signIn();
   assert.equal(login.status, 200);
-  assert.match(login.cookie, /^ts_session=[A-Za-z0-9_-]{43}$/);
+  assert.match(login.cookie, /^(__Host-)?ts_session=[A-Za-z0-9_-]{43}$/);
   const session = login.cookie;
   assert.equal(
     (await call('/api/session', undefined, session)).json.address,

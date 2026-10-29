@@ -47,7 +47,7 @@ Fill in every `TODO` in `caution.hcl`. `http.domain` and the host in `PUBLIC_ORI
    caution secret encrypt     # -> .caution/secrets/DATA_KEY.asc, DATABASE_URL.asc
    caution secret inspect
    ```
-4. Commit `.caution/quorum-bundle.json`, `.caution/keymaker-pcr-policy.json` and `.caution/secrets/*.asc`. The Containerfile copies them to `/etc/caution/` and fails the build if they are missing. `.dockerignore` admits only those files from `.caution/`.
+4. Commit `.caution/quorum-bundle.json`, `.caution/keymaker-pcr-policy.json` and `.caution/secrets/*.asc`. The Containerfile copies them to `/etc/caution/` when present (self-hosted builds have none). If they're missing, the build still succeeds but the enclave can't unlock `DATABASE_URL` or `DATA_KEY` and won't start, so check they're committed before pushing. `.dockerignore` admits only those files from `.caution/`.
 5. **Escrow `DATA_KEY` offline**, for example split among the holders, then delete `.env`. Sealed rows cannot be read without it. You also need the plaintext to re-encrypt it when holders change, because a new bundle means a new key.
 
 ## 3. First deploy

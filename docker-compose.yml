@@ -1,0 +1,39 @@
+# Self-host Tensor Safe on one machine: the app plus Caddy for automatic HTTPS.
+#   cp .env.example .env    # set DOMAIN (and optionally DATA_KEY)
+#   docker compose up -d --build
+# Point DOMAIN's DNS A/AAAA record at this machine first; ports 80 and 443 must be open.
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Containerfile
+    # The pinned StageX base images are amd64; ARM hosts run it under emulation.
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      PUBLIC_ORIGIN: https://${DOMAIN:?set DOMAIN in .env}
+      # Caddy sets X-Forwarded-For; the app is reachable only through it.
+      TRUST_PROXY: '1'
+      DATA_KEY: ${DATA_KEY:-}
+    volumes:
+      - data:/data
+    expose:
+      - '8080'
+
+  caddy:
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN}
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy:/data
+    depends_on:
+      - app
+
+volumes:
+  data:
+  caddy:

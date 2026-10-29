@@ -1,4 +1,4 @@
-import { scanOwnerCredits } from '@/lib/accrual';
+import { runtimeForCode, scanOwnerCredits } from '@/lib/accrual';
 import { verifySignedExtrinsic } from '@/lib/offline';
 import { blake2AsHex } from '@polkadot/util-crypto';
 import type { Option } from '@polkadot/types';
@@ -375,7 +375,7 @@ export async function updateWorkspace(request: Request, id: string) {
         const source =
           command.action === 'distribute'
             ? command.source
-            : `Runtime 454 archive reconstruction; code ${accrued!.codeHash}; end ${accrued!.blockHash}; auto-lock ${accrued!.locked}`;
+            : `Runtime ${runtimeForCode(accrued!.codeHash)} archive reconstruction; code ${accrued!.codeHash}; end ${accrued!.blockHash}; auto-lock ${accrued!.locked}`;
         const account = w.accounts.find((v) => v.id === a.accountId)!;
         api = await connect(account.network, true);
         const finalized = await api.rpc.chain.getHeader(

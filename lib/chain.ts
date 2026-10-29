@@ -309,8 +309,12 @@ export async function hashedRegistration(api: Chain, address: string) {
     at.query.hashedAccounts.accounts(id),
     at.query.hashedAccounts.mlDsaAccounts(id),
   ]);
-  return (v1 as Option<Null>).isSome || (v2 as Option<Null>).isSome
-    ? 'registered'
+  if ((v1 as Option<Null>).isSome || (v2 as Option<Null>).isSome)
+    return 'registered';
+  // Registration stays closed until governance enables hashed accounts.
+  const enabled = at.query.adminUtils?.hashedAccountsEnabled;
+  return enabled && (await enabled()).toString() !== 'true'
+    ? 'unsupported'
     : 'unregistered';
 }
 /**

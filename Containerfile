@@ -30,12 +30,15 @@ RUN --network=none <<'EOF'
 set -eu
 R=/rootfs
 
-# Locksmith inputs, at the paths Caution documents. Fails the build if missing,
-# because caution.hcl reads DATABASE_URL and DATA_KEY via env::vault.
-mkdir -p $R/etc/caution
-cp .caution/quorum-bundle.json $R/etc/caution/bundle.json
-cp .caution/keymaker-pcr-policy.json $R/etc/caution/keymaker-pcr-policy.json
-cp -R .caution/secrets $R/etc/caution/secrets
+# Caution's Locksmith inputs, at the paths its docs specify, when present.
+# Self-hosted builds have none and pass secrets as ordinary env vars instead;
+# a Caution deployment without them can't unlock DATABASE_URL / DATA_KEY.
+if [ -f .caution/quorum-bundle.json ]; then
+  mkdir -p $R/etc/caution
+  cp .caution/quorum-bundle.json $R/etc/caution/bundle.json
+  cp .caution/keymaker-pcr-policy.json $R/etc/caution/keymaker-pcr-policy.json
+  cp -R .caution/secrets $R/etc/caution/secrets
+fi
 # Keep .caution out of Tailwind's source scan so CSS depends on app source only.
 rm -rf .caution
 
@@ -62,11 +65,20 @@ find $R -type d -exec chmod 0755 {} +
 find $R -type f -exec chmod 0644 {} +
 chmod 0755 $R/usr/bin/node
 find $R -exec touch -h -d @0 {} +
+# The one writable path: SQLite for self-hosting (mount a volume here).
+mkdir -p $R/data
+chown 1000:1000 $R/data
+touch -h -d @0 $R/data
 EOF
 
 FROM stagex/core-filesystem:sx2026.09.0@sha256:da28831927652291b0fa573092fd41c8c96ca181ea224df7bff40e1833c3db13
 COPY --from=build /rootfs /
 USER 1000:1000
 WORKDIR /app
-# Runtime configuration lives in caution.hcl `unit.env`; this is for `docker run`.
+# Defaults for self-hosting; caution.hcl sets its own. PUBLIC_ORIGIN is required.
+ENV PORT=8080 \
+    STATIC_DIR=/app/dist/client \
+    DB_DIR=/app/db \
+    DATABASE_PATH=/data/tensor-safe.db
+EXPOSE 8080
 ENTRYPOINT ["/usr/bin/node", "/app/dist/server/main.js"]

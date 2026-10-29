@@ -18,7 +18,7 @@ A Safe-inspired, non-custodial Bittensor treasury workspace: a React single-page
 
 This is research-lab software, not an audited custody product. No real funds were moved during development. Hardware-device operation and a funded multi-party testnet lifecycle still need validation.
 
-Ordinary owner emission credits have no dedicated runtime event. **Automatic archive reconstruction is implemented for stable, unleased subnets on runtime 454.** Sync runs in 16-block durable checkpoints, checks exact fixed-point owner-cut accrual and epoch drains, and rejects lease, ownership, registration, runtime or privileged-storage transitions. The configured RPC must retain the requested archive. Unsupported intervals use an explicitly declared, independently reconciled amount and source reference. Neither path infers revenue from balance growth or an APY timer. Auto-locked credits are recorded as earned, not necessarily spendable; a payout still requires available stake. Native lease history loads 25 finalized blocks per page and follows canonical parent hashes to genesis. Exports state their loaded range; archive availability determines how far back scanning can proceed.
+Ordinary owner emission credits have no dedicated runtime event. **Automatic archive reconstruction is implemented for stable, unleased subnets on verified runtimes 454 and 486.** Sync runs in 16-block durable checkpoints, checks exact fixed-point owner-cut accrual and epoch drains, and rejects lease, ownership, registration, runtime or privileged-storage transitions. The configured RPC must retain the requested archive. Unsupported intervals use an explicitly declared, independently reconciled amount and source reference. Neither path infers revenue from balance growth or an APY timer. Auto-locked credits are recorded as earned, not necessarily spendable; a payout still requires available stake. Native lease history loads 25 finalized blocks per page and follows canonical parent hashes to genesis. Exports state their loaded range; archive availability determines how far back scanning can proceed.
 
 Advanced proxy operations (announcements, delayed execution, pure proxies and beneficiary-specific calls) use reviewed SCALE calls; dedicated guided forms are not provided. External accounts must supply their exact multisig preimage. Mainnet and testnet genesis hashes are pinned.
 
@@ -43,12 +43,26 @@ npm run build      # dist/client (static app) + dist/server/main.js
 npm start          # serve both from one process
 ```
 
+## Self-host
+
+One machine with Docker and a domain name pointed at it:
+
+```sh
+git clone https://github.com/cisterciansis/tensor-safe && cd tensor-safe
+cp .env.example .env        # set DOMAIN; optionally DATA_KEY
+docker compose up -d --build
+```
+
+Caddy obtains the HTTPS certificate and proxies to the app; data lives in SQLite on a Docker volume (`data`). Back up that volume and, if you set it, `DATA_KEY`. Without the key the data can't be read.
+
+Without Docker: `npm ci && npm run build`, then run `PUBLIC_ORIGIN=https://your.domain STATIC_DIR=dist/client npm start` behind any TLS reverse proxy (set `TRUST_PROXY=1` if the proxy sets `X-Forwarded-For`). Wallet sign-in needs HTTPS for its secure cookie, except on `localhost`. For several instances or a host without a durable disk, set `DATABASE_URL` to Postgres.
+
 ## Small architecture
 
 - `lib/domain.ts`: strict boundary schemas, address identity, integer math, interval rules and signed-record checks.
 - `lib/chain.ts`: metadata-aware call construction, multisig lifecycle and finalized outcome verification.
 - `lib/auth.ts`: the exact sign-in and signed-change messages wallets sign, shared by browser and server.
-- `lib/accrual.ts`: bounded runtime-454 archive reconstruction with continuity and ownership checks.
+- `lib/accrual.ts`: bounded, runtime-allowlisted (454, 486) archive reconstruction with continuity and ownership checks.
 - `lib/offline.ts`: metadata proofs and strict signed-payload verification.
 - `server/`: `node:http` server (`main.ts`), wallet sessions (`session.ts`), workspace commands (`workspace.ts`, `workspaces.ts`) and storage (`db.ts`: SQLite, or Postgres when `DATABASE_URL` is set). Each state update uses a version compare-and-swap and one transaction holding the audit record, settlement evidence and signed-change nonce.
 - `db/migrations`, `db/migrations-pg`: numbered SQL applied at startup.
@@ -71,7 +85,7 @@ Runtime upgrades require fresh proposal review. Pending old-runtime proposals ma
 
 ## Quantum-safe wallets (subtensor#3220)
 
-Support for the ML-DSA-65, Falcon-512/1024 and rotating ("hashed") wallet types is built in and switches on per network from runtime metadata. Neither mainnet nor testnet exposes it yet (runtime 486); nothing falls back to a weaker path.
+Support for the ML-DSA-65, Falcon-512/1024 and rotating ("hashed") wallet types is built in and switches on per network from runtime metadata. The protocol change is merged for runtime 487; mainnet and testnet still run 486, so it stays off there, and nothing falls back to a weaker path. Rotating-wallet registration also waits for governance to enable hashed accounts.
 
 - **Addresses.** Every address field accepts SS58 or a `tao_` receiving address (60 or 103 characters). A `tao_` address is checksum-verified and resolved to its permanent account; the descriptor is kept with the contact or signer. Paying, adding as a co-signer, or granting a proxy to a `tao_` account requires its finalized registration on that network.
 - **Quantum-safe multisig.** New accounts can use the registration-free off-curve derivation (`Multisig.*_safe`), which no raw Sr25519/Ed25519 key can sign for. The derivation is identity: stored accounts without a mode stay legacy and are never reinterpreted. The server refuses to record a safe account on a network without the safe calls. Only a quorum that always includes quantum-resistant members is quantum-resistant.
@@ -83,18 +97,18 @@ Support for the ML-DSA-65, Falcon-512/1024 and rotating ("hashed") wallet types 
 
 **Sign-in.** The server issues a one-time message bound to its public origin, your address, a nonce and a 10-minute expiry. Your wallet signs it (wrapped in `<Bytes>`, so it can never be a transaction) and the server opens a 12-hour HttpOnly, SameSite=Strict session. Challenges are single use and rate-limited.
 
-**Signed changes.** Adding an account, contact or cap table, and revising a cap table, require a wallet signature over the exact request: origin, route, workspace, action, network, body hash, signer, nonce and expiry. The server rejects a mismatch or replay and stores the signature with the record. Every browser re-checks it: a record changed after signing shows *Not wallet-signed*, and payouts refuse a cap table that doesn't verify.
+**Signed changes.** Adding an account, contact or cap table, and revising a cap table, require a wallet signature over the exact request: origin, route, workspace, action, network, body hash, signer, nonce and expiry. The server rejects a mismatch or replay and stores the signature with the record. Every browser re-checks it: a record changed after signing shows _Not wallet-signed_, and payouts refuse a cap table that doesn't verify.
 
 **Hosting.** Configuration is environment variables:
 
-| Variable | Purpose |
-| --- | --- |
-| `PUBLIC_ORIGIN` | Exact origin users load (`https://…`). Required in production; sign-in and same-origin checks bind to it. |
-| `PORT`, `STATIC_DIR` | Listen port and the built `dist/client` to serve. |
-| `DATABASE_URL` | Postgres (TLS mode in the URL). Without it, SQLite at `DATABASE_PATH` (default `data/tensor-safe.db`). |
-| `DATA_KEY` | Optional base64 32-byte key. Workspace state and audit details are then AES-256-GCM sealed at rest. |
-| `TRUST_PROXY` | Set behind a TLS proxy so rate limits use `X-Forwarded-For`. |
-| `DB_DIR` | Directory holding `migrations/` and `migrations-pg/` (default `./db`). |
+| Variable             | Purpose                                                                                                   |
+| -------------------- | --------------------------------------------------------------------------------------------------------- |
+| `PUBLIC_ORIGIN`      | Exact origin users load (`https://…`). Required in production; sign-in and same-origin checks bind to it. |
+| `PORT`, `STATIC_DIR` | Listen port and the built `dist/client` to serve.                                                         |
+| `DATABASE_URL`       | Postgres (TLS mode in the URL). Without it, SQLite at `DATABASE_PATH` (default `data/tensor-safe.db`).    |
+| `DATA_KEY`           | Optional base64 32-byte key. Workspace state and audit details are then AES-256-GCM sealed at rest.       |
+| `TRUST_PROXY`        | Set behind a TLS proxy so rate limits use `X-Forwarded-For`.                                              |
+| `DB_DIR`             | Directory holding `migrations/` and `migrations-pg/` (default `./db`).                                    |
 
 Responses carry a strict Content-Security-Policy (scripts only from this origin; network only to this origin and the Bittensor RPC endpoints), frame denial and no-referrer. For the attested deployment on AWS Nitro Enclaves via Caution, see `docs/deploy-caution.md`.
 
@@ -114,4 +128,4 @@ Run `npx tsx tests/controls.integration.ts` for read-only live call encoding ver
 
 ## License and security
 
-Apache-2.0; see `LICENSE`. Report vulnerabilities privately as described in `SECURITY.md`.
+Apache-2.0; see `LICENSE`. Contributions welcome: see `CONTRIBUTING.md`. Report vulnerabilities privately as described in `SECURITY.md`.

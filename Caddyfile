@@ -1,0 +1,5 @@
+# Automatic HTTPS for {$DOMAIN}; the app sets its own security headers.
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy app:8080
+}
