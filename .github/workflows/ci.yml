@@ -42,6 +42,10 @@ jobs:
           for i in $(seq 1 30); do curl -sf -o /dev/null http://localhost:8080/ && break; sleep 2; done
           test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/)" = 200
           test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/api/session)" = 401
-      - name: Container logs
+      - name: Container diagnostics
         if: failure()
-        run: docker ps -a; docker logs ts
+        run: |
+          docker ps -a; docker logs ts || true
+          docker run --rm --entrypoint /usr/bin/node tensor-safe:ci --version || echo "node exit $?"
+          docker run --rm --entrypoint /usr/bin/node tensor-safe:ci -e "console.log('node ok', process.arch)" || echo "script exit $?"
+          timeout 20 docker run --rm -e PUBLIC_ORIGIN=http://localhost:8080 tensor-safe:ci || echo "server exit $?"
