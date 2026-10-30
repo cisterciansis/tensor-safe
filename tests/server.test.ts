@@ -30,6 +30,8 @@ const server = process.env.TEST_ORIGIN
         DATABASE_PATH: join(dir, 'test.db'),
       },
       stdio: ['ignore', 'pipe', 'inherit'],
+      // Own process group: npx and tsx fork children that must all stop.
+      detached: true,
     });
 if (server)
   await new Promise<void>((ready) =>
@@ -372,6 +374,7 @@ try {
     'PASS wallet sign-in, single-use challenges, sessions, origin checks, signed changes, replay rejection and member roles',
   );
 } finally {
-  server?.kill();
+  if (server?.pid) process.kill(-server.pid, 'SIGTERM');
+  server?.stdout?.destroy();
   rmSync(dir, { recursive: true, force: true });
 }
