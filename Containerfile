@@ -64,6 +64,9 @@ ln -s certs/ca-certificates.crt $R/etc/ssl/cert.pem
 find $R -type d -exec chmod 0755 {} +
 find $R -type f -exec chmod 0644 {} +
 chmod 0755 $R/usr/bin/node
+# The kernel execs the ELF interpreter, so the loader (and, by convention, the
+# shared libraries) must stay executable; emulators hide this, native hosts don't.
+chmod 0755 $R/usr/lib/ld-musl-x86_64.so.1 $R/usr/lib/*.so*
 find $R -exec touch -h -d @0 {} +
 # The one writable path: SQLite for self-hosting (mount a volume here).
 mkdir -p $R/data
